@@ -1,0 +1,833 @@
+/*
+Quartam Writing API for XML Library for LiveCode [libqrtwax.livecode]
+Copyright (C) 2014-2015 Quartam Software / Jan Schenkel
+
+This program is free software; you can redistribute it and/or modify 
+it under the terms of the GNU Lesser General Public License as 
+published by the Free Software Foundation, either version 3 of the 
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, 
+but WITHOUT ANY WARRANTY; without even the implied warranty of 
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the 
+GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License 
+along with this program.  If not, see <http://www.gnu.org/licenses>.
+
+You can be released from the requirements of the license by purchasing a 
+commercial license.
+
+For more information, please contact Quartam Software at this address:
+licenses@quartam.com
+*/
+
+/*
+ACKNOWLEDGEMENTS:
+- inspired by OpenEdge ABL SAX-WRITER <https://documentation.progress.com/output/ua/OpenEdge_latest/dvxml/sax-writer-overview.html>
+*/
+
+--> script constants
+
+constant kLibVersion = "1.0.0"
+constant kLibErrorPrefix = "qrtwaxerr: "
+
+-- document array keys
+constant kd_Buffer = "buffer"
+constant kd_CurrentIndent = "currentindent"
+constant kd_ElemNameStack = "elemnamestack"
+constant kd_Encoding = "encoding"
+constant kd_File = "file"
+constant kd_Formatted = "formatted"
+constant kd_Indentation = "indentation"
+constant kd_LastAction = "lastaction"
+constant kd_OutputDestination = "outputdestination"
+constant kd_Standalone = "standalone"
+constant kd_State = "state"
+constant kd_Strict = "strict"
+
+-- document states
+constant ks_Initial = "initial"
+constant ks_Begin = "begin"
+constant ks_Tag = "tag"
+constant ks_Element = "element"
+constant ks_Content = "content"
+constant ks_Complete = "complete"
+constant ks_Error = "error"
+
+-- document actions
+constant ka_EndElement = "endelement"
+constant ka_StartElement = "startelement"
+constant ka_WriteAttribute = "writeattribute"
+constant ka_WriteCDATA = "writecdata"
+constant ka_WriteCharacters = "writecharacters"
+constant ka_WriteComment = "writecomment"
+constant ka_WriteFragment = "writefragment"
+constant ka_WriteProcessingInstruction = "writeprocessinginstruction"
+
+-- document output destination types
+constant ko_File = "file"
+constant ko_Memory = "memory"
+
+-- encoding array keys
+constant ke_LC = "lc"
+constant ke_IANA = "iana"
+constant ke_BOM = "bom"
+
+--> script local variables
+
+local sDocumentsA
+local sEncodingsA
+local sNextDocumentId
+local sSupportedEncodings
+local sTemplatePropsA
+
+--> engine message handlers
+
+on libraryStack
+   if the target is me then
+      p_qrtWAX_LoadLib
+   end if
+   pass libraryStack
+end libraryStack
+
+on releaseStack
+   if the target is me then
+      p_qrtWAX_UnloadLib
+   end if
+   pass releaseStack
+end releaseStack
+
+--> public commands and functions
+
+function qrtWAX_Version
+   return kLibVersion
+end qrtWAX_Version
+
+function qrtWAX_SupportedEncodings
+   return sSupportedEncodings
+end qrtWAX_SupportedEncodings
+
+command qrtWAX_ResetAll
+   p_qrtWAX_ResetAll
+end qrtWAX_ResetAll
+
+command qrtWAX_ResetTemplateProperties
+   p_qrtWAX_ResetTemmplateProps
+end qrtWAX_ResetTemplateProperties
+
+function qrtWAX_TemplateProperties
+   return sTemplatePropsA
+end qrtWAX_TemplateProperties
+
+command qrtWAX_SetTemplateProperties pTemplatePropsA
+   local tPropName, tPropValue
+   repeat for each key tPropName in pTemplatePropsA
+      put pTemplatePropsA[tPropName] into tPropValue
+      p_qrtWAX_AssertProperty tPropName, tPropValue
+   end repeat
+   -- if no error was thrown we can assume it's safe to update
+   repeat for each key tPropName in pTemplatePropsA
+      put pTemplatePropsA[tPropName] into sTemplatePropsA[tPropName]
+   end repeat
+end qrtWAX_SetTemplateProperties
+
+function qrtWAX_TemplateProperty pPropName
+   return sTemplatePropsA[pPropName]
+end qrtWAX_TemplateProperty
+
+command qrtWAX_SetTemplateProperty pPropName, pPropValue
+   p_qrtWAX_AssertProperty pPropName, pPropValue
+   put pPropValue into sTemplatePropsA[pPropName]
+end qrtWAX_SetTemplateProperty
+
+function qrtWAX_CreateDocument pInstancePropsA
+   -- merge the template properties with the parameters
+   local tInstancePropsA, tPropName, tPropValue
+   put sTemplatePropsA into tInstancePropsA
+   if the paramCount > 1 then
+      -- interpret the params as key-value pairs
+      repeat with tIndex = 1 to the paramCount - 1 step 2
+         put param(tIndex) into tPropName
+         put param(tIndex + 1) into tPropValue
+         p_qrtWAX_AssertProperty tPropName, tPropValue
+         put tPropValue into tInstancePropsA[tPropName]
+      end repeat
+   else if the paramCount = 1 and pInstancePropsA is an array then
+      repeat for each key tPropName in pInstancePropsA
+         put pInstancePropsA[tPropName] into tPropValue
+         p_qrtWAX_AssertProperty tPropName, tPropValue
+         put tPropValue into tInstancePropsA[tPropName]
+      end repeat
+   else
+      throw kLibErrorPrefix & "invalid parameters for qrtWAX_CreateDocument (expected either name-value pairs or an array)"
+   end if
+   if tInstancePropsA[kd_OutputDestination] is ko_File and tInstancePropsA[kd_File] is empty then
+      throw kLibErrorPrefix & "missing paramater 'file'"
+   end if
+   return p_qrtWAX_CreateDoc(tInstancePropsA)
+end qrtWAX_CreateDocument
+
+function qrtWAX_DocumentState pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   return p_qrtWAX_DocState(pDocumentId)
+end qrtWAX_DocumentState
+
+function qrtWAX_DocumentBytes pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   return p_qrtWAX_DocBytes(pDocumentId)
+end qrtWAX_DocumentBytes
+
+command qrtWAX_DeleteDocument pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_DeleteDoc pDocumentId
+end qrtWAX_DeleteDocument
+
+command qrtWAX_StartDocument pDocumentId
+   p_qrtWAX_AssertStartDocument pDocumentId
+   p_qrtWAX_StartDoc pDocumentId
+end qrtWAX_StartDocument
+
+command qrtWAX_EndDocument pDocumentId
+   p_qrtWAX_AssertEndDocument pDocumentId
+   p_qrtWAX_EndDoc pDocumentId
+end qrtWAX_EndDocument
+
+command qrtWAX_StartElement pDocumentId, pElement, pAttributesA
+   p_qrtWAX_AssertStartElement pDocumentId, pElement, pAttributesA
+   p_qrtWAX_StartElem pDocumentId, pElement, pAttributesA
+end qrtWAX_StartElement
+
+command qrtWAX_EndElement pDocumentId, pElement
+   p_qrtWAX_AssertEndElement pDocumentId, pElement
+   p_qrtWAX_EndElem pDocumentId, pElement
+end qrtWAX_EndElement
+
+command qrtWAX_WriteAttribute pDocumentId, pAttributeName, pAttributeValue
+   p_qrtWAX_AssertWriteAttribute pDocumentId, pAttributeName, pAttributeValue
+   p_qrtWAX_WriteAttrib pDocumentId, pAttributeName, pAttributeValue
+end qrtWAX_WriteAttribute
+
+command qrtWAX_WriteCDATA pDocumentId, pData
+   p_qrtWAX_AssertWriteCDATA pDocumentId, pData
+   p_qrtWAX_WriteCDATA pDocumentId, pData
+end qrtWAX_WriteCDATA
+
+command qrtWAX_WriteCharacters pDocumentId, pCharacters
+   p_qrtWAX_AssertWriteCharacters pDocumentId
+   p_qrtWAX_WriteChars pDocumentId, pCharacters
+end qrtWAX_WriteCharacters
+
+command qrtWAX_WriteComment pDocumentId, pComment
+   p_qrtWAX_AssertWriteComment pDocumentId
+   p_qrtWAX_WriteCmnt pDocumentId, pComment
+end qrtWAX_WriteComment
+
+command qrtWAX_WriteElement pDocumentId, pElement, pCharacters, pAttributesA
+   p_qrtWAX_AssertWriteElement pDocumentId, pElement, pAttributesA
+   p_qrtWAX_WriteElem pDocumentId, pElement, pCharacters, pAttributesA
+end qrtWAX_WriteElement
+
+command qrtWAX_WriteEmptyElement pDocumentId, pElement, pAttributesA
+   p_qrtWAX_AssertWriteEmptyElement pDocumentId, pElement, pAttributesA
+   p_qrtWAX_WriteEmptyElem pDocumentId, pElement, pAttributesA
+end qrtWAX_WriteEmptyElement
+
+command qrtWAX_WriteFragment pDocumentId, pFragment
+   p_qrtWAX_AssertWriteFragment pDocumentId
+   p_qrtWAX_WriteFragment pDocumentId, pFragment
+end qrtWAX_WriteFragment
+
+command qrtWAX_WriteProcessingInstruction pDocumentId, pInstruction
+   p_qrtWAX_AssertWriteProcessingInstruction pDocumentId
+   p_qrtWAX_WritePI pDocumentId, pInstruction
+end qrtWAX_WriteProcessingInstruction
+
+--> private commands and functions
+
+-- private > property assertions
+
+private command p_qrtWAX_AssertProperty pPropName, pPropValue
+   switch pPropName
+      case kd_Encoding
+         p_qrtWAX_AssertEncoding pPropName, pPropValue
+         break
+      case kd_File
+         p_qrtWAX_AssertFile pPropName, pPropValue
+         break
+      case kd_Formatted
+      case kd_Strict
+         p_qrtWAX_AssertBoolean pPropName, pPropValue
+         break
+      case kd_Indentation
+         p_qrtWAX_AssertIndentation pPropName, pPropValue
+         break
+      case kd_OutputDestination
+         p_qrtWAX_AssertOutputDestination pPropName, pPropValue
+         break
+      case kd_Standalone
+         p_qrtWAX_AssertStandalone pPropName, pPropValue
+         break
+      default
+         throw kLibErrorPrefix & "invalid property name '" & pPropName & "'"
+   end switch
+end p_qrtWAX_AssertProperty
+
+private command p_qrtWAX_AssertBoolean pPropName, pPropValue
+   if pPropValue is not a boolean then
+      throw kLibErrorPrefix & pPropName && "must be true or false"
+   end if
+end p_qrtWAX_AssertBoolean
+
+private command p_qrtWAX_AssertEncoding pPropName, pPropValue
+   if pPropValue is not among the items of sSupportedEncodings then
+      throw kLibErrorPrefix & pPropName && "must be one of '" &  sSupportedEncodings & "'"
+   end if
+end p_qrtWAX_AssertEncoding
+
+private command p_qrtWAX_AssertFile pPropName, pPropValue
+   if pPropValue is empty then
+      throw kLibErrorPrefix & pPropName && "is not a valid filename"
+   end if
+end p_qrtWAX_AssertFile
+
+private command p_qrtWAX_AssertIndentation pPropName, pPropValue
+   repeat for each char tChar in pPropValue
+      if tChar is not space or tChar is not tab then
+         throw kLibErrorPrefix & pPropName && "may only contain spaces and tabs"
+      end if
+   end repeat
+end p_qrtWAX_AssertIndentation
+
+private command p_qrtWAX_AssertOutputDestination pPropName, pPropValue
+   if pPropValue is not ko_File and pPropValue is not ko_Memory then
+      throw kLibErrorPrefix & pPropName && "must be" && ko_File && "or" && ko_Memory
+   end if
+end p_qrtWAX_AssertOutputDestination
+
+private command p_qrtWAX_AssertStandalone pPropName, pPropValue
+   if pPropValue is not empty and pPropValue is not a boolean then
+      throw kLibErrorPrefix & pPropName && "must be empty or true or false"
+   end if
+end p_qrtWAX_AssertStandalone
+
+-- private > document assertions
+
+private command p_qrtWAX_AssertDocument pDocumentId
+   if pDocumentId is not among the keys of sDocumentsA then
+      throw kLibErrorPrefix & "'" & pDocumentId & "' is not a valid document id"
+   end if
+end p_qrtWAX_AssertDocument
+
+private command p_qrtWAX_AssertDocumentState pDocumentId, pStates, pCommand
+   if sDocumentsA[pDocumentId][kd_State] is not among the items of pStates then
+      throw kLibErrorPrefix & pCommand && "'" & pDocumentId & "' is not in state '" & pStates & "' but in state '" & sDocumentsA[pDocumentId][kd_State]
+   end if
+end p_qrtWAX_AssertDocumentState
+
+-- private > xml assertions
+
+private command p_qrtWAX_AssertXmlAttributes @pAttributesA
+   repeat for each key tAttributeName in pAttributesA
+      p_qrtWAX_AssertXmlName "Attribute", tAttributeName
+      p_qrtWAX_AssertXmlAttributeValue tAttributeName, pAttributesA[tAttributeName]
+   end repeat
+end p_qrtWAX_AssertXmlAttributes
+
+private command p_qrtWAX_AssertXmlAttributeValue pAttributeName, pAttributeValue
+   ## TODO: expand check with ampersand entity references
+   if the number of lines in pAttributeValue > 1 then
+      throw kLibErrorPrefix & "invalid" && pAttributeName && "attribute value (must be a single line)"
+   else if "<" is in pAttributeValue then
+      throw kLibErrorPrefix & "invalid" && pAttributeName && "attribute value (cannot contain '<')"
+   end if
+end p_qrtWAX_AssertXmlAttributeValue
+
+private command p_qrtWAX_AssertXmlName pNameType, pNameValue
+   ## TODO: expand check with Unicode 'letters'
+   if pNameValue begins with "xml" then
+      throw kLibErrorPrefix & "invalid" && pNameType && "name (cannot begin with 'xml')"
+   else if char 1 of pNameValue is not in ":_abcdefghijklmnopqrstuvwxyz" then
+      throw kLibErrorPrefix & "invalid" && pNameType && "name (must begin with colon, underscore or letter)"
+   else
+      repeat for each char tChar in pNameValue
+         if tChar is not in ":_abcdefghijklmnopqrstuvwxyz-.0123456789" then
+            throw kLibErrorPrefix & "invalid" && pNameType && "name (must not contain other characters than colon, underscore, dash, period, letters or digits)"
+         end if
+      end repeat
+   end if
+end p_qrtWAX_AssertXmlName
+
+-- private > action assertions
+
+private command p_qrtWAX_AssertEndDocument pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, ks_Content, "EndDocument"
+   --
+   if sDocumentsA[pDocumentId][kd_Strict] is true then
+      if sDocumentsA[pDocumentId][kd_ElemNameStack] is not empty then
+         throw kLibErrorPrefix & "EndDocument called while there were unclosed elements '" & sDocumentsA[pDocumentId][kd_ElemNameStack] &"'"
+      end if
+   end if
+end p_qrtWAX_AssertEndDocument
+
+private command p_qrtWAX_AssertEndElement pDocumentId, pElement
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Tag,ks_Element,ks_Content), "EndElement"
+   --
+   if sDocumentsA[pDocumentId][kd_Strict] is true then
+      local tElement
+      put p_qrtWAX_PeekElem(pDocumentId) into tElement
+      set the caseSensitive to true
+      set the formSensitive to true
+      if tElement is not pElement then
+         throw kLibErrorPrefix & "EndElement expected '" & tElement & "' but got '" & pElement & "'"
+      end if
+   end if
+end p_qrtWAX_AssertEndElement
+
+private command p_qrtWAX_AssertStartDocument pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, ks_Initial, "StartDocument"
+end p_qrtWAX_AssertStartDocument
+
+private command p_qrtWAX_AssertStartElement pDocumentId, pElement, @pAttributesA
+   p_qrtWAX_AssertBeginElement pDocumentId, pElement, pAttributesA, "StartElement"
+end p_qrtWAX_AssertStartElement
+
+private command p_qrtWAX_AssertBeginElement pDocumentId, pElement, @pAttributesA, pAction
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertXmlName "Element", pElement
+   p_qrtWAX_AssertXmlAttributes pAttributesA
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Begin,ks_Tag,ks_Element,ks_Content), pAction
+   --
+   if sDocumentsA[pDocumentId][kd_Strict] is true then
+      if sDocumentsA[pDocumentId][kd_State] is not ks_Begin \
+            and sDocumentsA[pDocumentId][kd_ElemNameStack] is empty
+      then
+         throw kLibErrorPrefix & pAction && "would result in multiple root nodes"
+      end if
+   end if
+end p_qrtWAX_AssertBeginElement
+
+private command p_qrtWAX_AssertWriteAttribute pDocumentId, pAttributeName, pAttributeValue
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, ks_Tag, "WriteAttribute"
+   p_qrtWAX_AssertXmlName "Attribute", pAttributeName
+   p_qrtWAX_AssertXmlAttributeValue pAttributeValue
+end p_qrtWAX_AssertWriteAttribute
+
+private command p_qrtWAX_AssertWriteCDATA pDocumentId, pData
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Tag,ks_Element,ks_Content), "WriteCDATA"
+   if sDocumentsA[pDocumentId][kd_Strict] is true then
+      if pData contains "]]>" then
+         throw kLibErrorPrefix & "WriteCDATA content may not contain ']]>'"
+      end if
+   end if
+end p_qrtWAX_AssertWriteCDATA
+
+private command p_qrtWAX_AssertWriteCharacters pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Tag,ks_Element,ks_Content), "WriteCharacters"
+end p_qrtWAX_AssertWriteCharacters
+
+private command p_qrtWAX_AssertWriteComment pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Begin,ks_Tag,ks_Element,ks_Content), "WriteComment"
+end p_qrtWAX_AssertWriteComment
+
+private command p_qrtWAX_AssertWriteFragment pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Begin,ks_Tag,ks_Element,ks_Content), "WriteFragment"
+end p_qrtWAX_AssertWriteFragment
+
+private command p_qrtWAX_AssertWriteElement pDocumentId, pElement, @pAttributesA
+   p_qrtWAX_AssertBeginElement pDocumentId, pElement, pAttributesA, "WriteElement"
+end p_qrtWAX_AssertWriteElement
+
+private command p_qrtWAX_AssertWriteEmptyElement pDocumentId, pElement, @pAttributesA
+   p_qrtWAX_AssertBeginElement pDocumentId, pElement, pAttributesA, "WriteEmptyElement"
+end p_qrtWAX_AssertWriteEmptyElement
+
+private command p_qrtWAX_AssertWriteProcessingInstruction pDocumentId
+   p_qrtWAX_AssertDocument pDocumentId
+   p_qrtWAX_AssertDocumentState pDocumentId, (ks_Begin,ks_Tag,ks_Element,ks_Content), "WriteProcessingInstruction"
+end p_qrtWAX_AssertWriteProcessingInstruction
+
+-- private > core commands and functions
+
+private command p_qrtWAX_LoadLib
+   -- determine the implementation and supported encodings
+   set the itemDelimiter to "."
+   if item 1 of the version < 7 then
+      throw kLibErrorPrefix & "LiveCode version 7.0 or later is required"
+   else if item 1 to 2 of the version >= 7.1 then
+      -- UTF-32 crashed in LC 7.0 ; fixed in 7.1
+      -- see: <http://quality.runrev.com/show_bug.cgi?id=15571>
+      put "Native,ASCII,UTF-8,UTF-16,UTF-16BE,UTF-16LE,UTF-32,UTF-32BE,UTF-32LE" into sSupportedEncodings
+   else if item 1 to 2 of the version = 7.0 then
+      put "Native,ASCII,UTF-8,UTF-16,UTF-16BE,UTF-16LE" into sSupportedEncodings
+   end if
+   -- initialize encodings and byte order marks
+   switch the platform
+      case "Win32"
+         put "CP1252" into sEncodingsA["Native"][ke_LC]
+         put "windows-1252" into sEncodingsA["Native"][ke_IANA]
+         break
+      case "Linux"
+         put "ISO-8859-1" into sEncodingsA["Native"][ke_LC]
+         put "ISO-8859-1" into sEncodingsA["Native"][ke_IANA]
+         break
+      case "MacOS"
+         put "MacRoman" into sEncodingsA["Native"][ke_LC]
+         put "MacRoman" into sEncodingsA["Native"][ke_IANA]
+         break
+      default -- not defined in LC 7.0 documentation
+         put "UTF-8" into sEncodingsA["Native"][ke_LC]
+         put "UTF-8" into sEncodingsA["Native"][ke_IANA]
+         break
+   end switch
+   put "ASCII" into sEncodingsA["ASCII"][ke_LC]
+   put "ASCII" into sEncodingsA["ASCII"][ke_IANA]
+   put "UTF-8" into sEncodingsA["UTF-8"][ke_LC]
+   put "UTF-8" into sEncodingsA["UTF-8"][ke_IANA]
+   put "UTF-16" into sEncodingsA["UTF-16"][ke_LC]
+   put "UTF-16" into sEncodingsA["UTF-16"][ke_IANA]
+   put "UTF-16BE" into sEncodingsA["UTF-16BE"][ke_LC]
+   put "UTF-16" into sEncodingsA["UTF-16BE"][ke_IANA]
+   put "UTF-16LE" into sEncodingsA["UTF-16LE"][ke_LC]
+   put "UTF-16" into sEncodingsA["UTF-16LE"][ke_IANA]
+   put "UTF-32" into sEncodingsA["UTF-32"][ke_LC]
+   put "UTF-32" into sEncodingsA["UTF-32"][ke_IANA]
+   put "UTF-32BE" into sEncodingsA["UTF-32BE"][ke_LC]
+   put "UTF-32" into sEncodingsA["UTF-32BE"][ke_IANA]
+   put "UTF-32LE" into sEncodingsA["UTF-32LE"][ke_LC]
+   put "UTF-32" into sEncodingsA["UTF-32LE"][ke_IANA]
+   put numToByte(0xEF) & numToByte(0xBB) & numToByte(0xBF) into sEncodingsA["UTF-8"][ke_BOM]
+   put numToByte(0xFE) & numToByte(0xFF) into sEncodingsA["UTF-16BE"][ke_BOM]
+   put numToByte(0xFF) & numToByte(0xFE) into sEncodingsA["UTF-16LE"][ke_BOM]
+   put numToByte(0x00) & numToByte(0x00) & numToByte(0xFE) & numToByte(0xFF) into sEncodingsA["UTF-32BE"][ke_BOM]
+   put numToByte(0xFF) & numToByte(0xFE) & numToByte(0x00) & numToByte(0x00) into sEncodingsA["UTF-32LE"][ke_BOM]
+   if p_qrtWAX_BigEndian() then
+      put sEncodingsA["UTF-16BE"][ke_BOM] into sEncodingsA["UTF-16"][ke_BOM]
+      put sEncodingsA["UTF-32BE"][ke_BOM] into sEncodingsA["UTF-32"][ke_BOM]
+   else 
+      put sEncodingsA["UTF-16LE"][ke_BOM] into sEncodingsA["UTF-16"][ke_BOM]
+      put sEncodingsA["UTF-32LE"][ke_BOM] into sEncodingsA["UTF-32"][ke_BOM]
+   end if
+   if sEncodingsA["Native"][ke_IANA] is "UTF-8" then
+      put sEncodingsA["UTF-8"][ke_BOM] into sEncodingsA["Native"][ke_BOM]
+   end if
+   -- initialize template properties
+   p_qrtWAX_ResetTemplateProps
+end p_qrtWAX_LoadLib
+
+private function p_qrtWAX_BigEndian
+   return 0 is byteToNum(byte 2 of textDecode("A", "ASCII"))
+end p_qrtWAX_BigEndian
+
+private command p_qrtWAX_UnloadLib
+   p_qrtWAX_ResetDocs
+end p_qrtWAX_UnloadLib
+
+private command p_qrtWAX_ResetAll
+   p_qrtWAX_ResetDocs
+   p_qrtWAX_ResetTemplateProps
+end p_qrtWAX_ResetAll
+
+private command p_qrtWAX_ResetDocs
+   -- close any open files
+   local tDocument
+   repeat for each element tDocument in sDocumentsA
+      if tDocument[kd_OutputDestination] is ko_File \
+            and tDocument[kd_File] is among the lines of the openFiles then
+         close file tDocument[kd_File]
+      end if
+   end repeat
+   -- initialize variables
+   put 0 into sNextDocumentId
+   delete variable sDocumentsA
+end p_qrtWAX_ResetDocs
+
+private command p_qrtWAX_ResetTemplateProps
+   put "UTF-8" into sTemplatePropsA[kd_Encoding]
+   put true into sTemplatePropsA[kd_Formatted]
+   put "  " into sTemplatePropsA[kd_Indentation]
+   put ko_Memory into sTemplatePropsA[kd_OutputDestination]
+   put empty into sTemplatePropsA[kd_Standalone]
+   put true into sTemplatePropsA[kd_Strict]
+end p_qrtWAX_ResetTemplateProps
+
+private function p_qrtWAX_CreateDoc pInstancePropsA
+   local tDocumentId
+   add 1 to sNextDocumentId
+   put sNextDocumentId into tDocumentId
+   put pInstancePropsA into sDocumentsA[tDocumentId]
+   put ks_Initial into sDocumentsA[tDocumentId][kd_State]
+   return tDocumentId
+end p_qrtWAX_CreateDoc
+
+private command p_qrtWAX_DeleteDoc pDocumentId
+   delete variable sDocumentsA[pDocumentId]
+end p_qrtWAX_DeleteDoc
+
+private function p_qrtWAX_DocState pDocumentId
+   return sDocumentsA[pDocumentId][kd_State]
+end p_qrtWAX_DocState
+
+private function p_qrtWAX_DocBytes pDocumentId
+   return sDocumentsA[pDocumentId][kd_Buffer]
+end p_qrtWAX_DocBytes
+
+private command p_qrtWAX_StartDoc pDocumentId
+   if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_File then
+      open file sDocumentsA[pDocumentId][kd_File] for binary write
+   else if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_Memory then
+      put empty into sDocumentsA[pDocumentId][kd_Buffer]
+   else -- should only happen during library development
+      throw kLibErrorPrefix & "invalid output destination '" & sDocumentsA[pDocumentId][kd_OutputDestination] & "'"
+   end if
+   -- encoding shenanigans
+   local tEncoding, tEncoding_IANA, tByteOrderMark
+   put sDocumentsA[pDocumentId][kd_Encoding] into tEncoding
+   put sEncodingsA[tEncoding][ke_IANA] into tEncoding_IANA
+   put sEncodingsA[tEncoding][ke_BOM] into tByteOrderMark
+   if tByteOrderMark is not empty then
+      p_qrtWAX_Write_Bytes pDocumentId, tByteOrderMark
+   end if
+   -- write xml declaration
+   p_qrtWAX_Write_Chunk pDocumentId, "<?xml version=" & quote & "1.0" & quote
+   p_qrtWAX_Write_Chunk pDocumentId, " encoding=" & quote & tEncoding_IANA & quote
+   if sDocumentsA[pDocumentId][kd_Standalone] is true then
+      p_qrtWAX_Write_Chunk pDocumentId, " standalone=" & quote & "yes" & quote
+   else if sDocumentsA[pDocumentId][kd_Standalone] is false then
+      p_qrtWAX_Write_Chunk pDocumentId, " standalone=" & quote & "no" & quote
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, "?>"
+   put ks_Begin into sDocumentsA[pDocumentId][kd_State]
+end p_qrtWAX_StartDoc
+
+private command p_qrtWAX_EndDoc pDocumentId
+   if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_File then
+      close file sDocumentsA[pDocumentId][kd_File]
+   else if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_Memory then
+      -- noop
+   else -- should only happen during library development
+      throw kLibErrorPrefix & "invalid output destination '" & sDocumentsA[pDocumentId][kd_OutputDestination] & "'"
+   end if
+   put ks_Complete into sDocumentsA[pDocumentId][kd_State]
+end p_qrtWAX_EndDoc
+
+private command p_qrtWAX_StartElem pDocumentId, pElement, pAttributesA
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+   end if
+   if sDocumentsA[pDocumentId][kd_Formatted] is true then
+      p_qrtWAX_Write_Chunk pDocumentId, return
+      repeat for sDocumentsA[pDocumentId][kd_CurrentIndent] times
+         p_qrtWAX_Write_Chunk pDocumentId, sDocumentsA[pDocumentId][kd_Indentation]
+      end repeat
+      add 1 to sDocumentsA[pDocumentId][kd_CurrentIndent]
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, "<" & pElement
+   local tAttributeNames, tAttributeName
+   put the keys of pAttributesA into tAttributeNames
+   repeat for each line tAttributeNames in tAttributeNames
+      p_qrtWAX_WriteFragment pDocumentId, space & tAttributeName & "=" & quote & p_qrtWAX_Escaped(pAttributesA[tAttributeName]) & quote
+   end repeat
+   p_qrtWAX_PushElem pDocumentId, pElement
+   put ks_Tag into sDocumentsA[pDocumentId][kd_State]
+   put ka_EndElement into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_StartElem
+
+private command p_qrtWAX_EndElem pDocumentId, pElement
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, "/>"
+   end if
+   if sDocumentsA[pDocumentId][kd_Formatted] is true then
+      subtract 1 from sDocumentsA[pDocumentId][kd_CurrentIndent]
+      if sDocumentsA[pDocumentId][kd_LastAction] is ka_EndElement then
+         if sDocumentsA[pDocumentId][kd_State] is not ks_Tag then
+            p_qrtWAX_Write_Chunk pDocumentId, return
+         end if
+         repeat for sDocumentsA[pDocumentId][kd_CurrentIndent] times
+            p_qrtWAX_Write_Chunk pDocumentId, sDocumentsA[pDocumentId][kd_Indentation]
+         end repeat
+      end if
+   end if
+   if sDocumentsA[pDocumentId][kd_State] is not ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, "</" & pElement & ">"
+   end if
+   p_qrtWAX_PopElem pDocumentId
+   put ks_Content into sDocumentsA[pDocumentId][kd_State]
+   put ka_EndElement into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_EndElem
+
+private command p_qrtWAX_WriteAttrib pDocumentId, pAttributeName, pAttributeValue
+   p_qrtWAX_Write_Chunk pDocumentId, space & pAttributeName & "=" & quote & p_qrtWAX_Escaped(pAttributeValue) & quote
+   put ka_WriteAttribute into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WriteAttrib
+
+private command p_qrtWAX_WriteCDATA pDocumentId, pData
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, "<![CDATA["
+   p_qrtWAX_Write_Chunk pDocumentId, pData
+   p_qrtWAX_Write_Chunk pDocumentId, "]]>"
+   put ks_Content into sDocumentsA[pDocumentId][kd_State]
+   put ka_WriteCDATA into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WriteCDATA
+
+private command p_qrtWAX_WriteChars pDocumentId, pCharacters
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+   end if
+   p_qrtWAX_Escape_And_Write pDocumentId, pCharacters
+   put ks_Content into sDocumentsA[pDocumentId][kd_State]
+   put ka_WriteCharacters into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WriteChars
+
+private command p_qrtWAX_WriteCmnt pDocumentId, pComment
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+      if sDocumentsA[pDocumentId][kd_Formatted] is true then
+         p_qrtWAX_Write_Chunk pDocumentId, return
+         repeat for sDocumentsA[pDocumentId][kd_CurrentIndent] times
+            p_qrtWAX_Write_Chunk pDocumentId, sDocumentsA[pDocumentId][kd_Indentation]
+         end repeat
+      end if
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, "<!--"
+   p_qrtWAX_Escape_And_Write pDocumentId, pComment
+   p_qrtWAX_Write_Chunk pDocumentId, "-->"
+   put ks_Content into sDocumentsA[pDocumentId][kd_State]
+   put ka_WriteComment into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WriteCmnt
+
+private command p_qrtWAX_WriteElem pDocumentId, pElement, pCharacters, pAttributesA
+   p_qrtWAX_StartElem pDocumentId, pElement, pAttributesA
+   if pCharacters is not empty then
+      p_qrtWAX_WriteChars pDocumentId, pCharacters
+   end if
+   p_qrtWAX_EndElem pDocumentId, pElement 
+end p_qrtWAX_WriteElem
+
+command p_qrtWAX_WriteEmptyElem pDocumentId, pElement, pAttributesA
+   p_qrtWAX_StartElem pDocumentId, pElement, pAttributesA
+   p_qrtWAX_EndElem pDocumentId, pElement 
+end p_qrtWAX_WriteEmptyElem
+
+private command p_qrtWAX_WriteFragment pDocumentId, pFragment
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+   else if sDocumentsA[pDocumentId][kd_State] is ks_Begin then
+      if sDocumentsA[pDocumentId][kd_Formatted] is true then
+         p_qrtWAX_Write_Chunk pDocumentId, return
+      end if
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, pFragment
+   if sDocumentsA[pDocumentId][kd_State] is not ks_Begin then
+      put ks_Content into sDocumentsA[pDocumentId][kd_State]
+   end if
+   put false into sDocumentsA[pDocumentId][kd_Strict] -- strictness is no longer guaranteed
+   put ka_WriteFragment into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WriteFragment
+
+private command p_qrtWAX_WritePI pDocumentId, pInstruction
+   if sDocumentsA[pDocumentId][kd_State] is ks_Tag then
+      p_qrtWAX_Write_Chunk pDocumentId, ">"
+      if sDocumentsA[pDocumentId][kd_Formatted] is true then
+         p_qrtWAX_Write_Chunk pDocumentId, return
+         repeat for sDocumentsA[pDocumentId][kd_CurrentIndent] times
+            p_qrtWAX_Write_Chunk pDocumentId, sDocumentsA[pDocumentId][kd_Indentation]
+         end repeat
+      end if
+   else if sDocumentsA[pDocumentId][kd_State] is ks_Begin then
+      if sDocumentsA[pDocumentId][kd_Formatted] is true then
+         p_qrtWAX_Write_Chunk pDocumentId, return
+      end if
+   else
+      if sDocumentsA[pDocumentId][kd_Formatted] is true then
+         if sDocumentsA[pDocumentId][kd_LastAction] is ka_EndElement  then
+            p_qrtWAX_Write_Chunk pDocumentId, return
+            repeat for sDocumentsA[pDocumentId][kd_CurrentIndent] times
+               p_qrtWAX_Write_Chunk pDocumentId, sDocumentsA[pDocumentId][kd_Indentation]
+            end repeat
+         end if
+      end if
+   end if
+   p_qrtWAX_Write_Chunk pDocumentId, "<?"
+   p_qrtWAX_Escape_And_Write pDocumentId, pInstruction
+   p_qrtWAX_Write_Chunk pDocumentId, "?>"
+   if sDocumentsA[pDocumentId][kd_State] is not ks_Begin then
+      put ks_Content into  sDocumentsA[pDocumentId][kd_State]
+   end if
+   put ka_WriteProcessingInstruction into sDocumentsA[pDocumentId][kd_LastAction]
+end p_qrtWAX_WritePI
+
+## private > low-level writing commands and functions
+
+private command p_qrtWAX_Escape_And_Write pDocumentId, pText
+   p_qrtWAX_Write_Chunk pDocumentId, p_qrtWAX_Escaped(pText)
+end p_qrtWAX_Escape_And_Write
+
+private command p_qrtWAX_Write_Chunk pDocumentId, pChunk
+   local tEncoding, tEncoding_LC, tBytes
+   put sDocumentsA[pDocumentId][kd_Encoding] into tEncoding
+   put sEncodingsA[tEncoding][ke_LC] into tEncoding_LC
+   put textEncode(pChunk, tEncoding_LC) into tBytes
+   p_qrtWAX_Write_Bytes pDocumentId, tBytes
+end p_qrtWAX_Write_Chunk
+
+private command p_qrtWAX_Write_Bytes pDocumentId, pBytes
+   if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_File then
+      write pBytes to file sDocumentsA[pDocumentId][kd_File]
+   else if sDocumentsA[pDocumentId][kd_OutputDestination] is ko_Memory then
+      put pBytes after sDocumentsA[pDocumentId][kd_Buffer]
+   else -- should only happen during library development
+      throw kLibErrorPrefix & "invalid output destination '" & sDocumentsA[pDocumentId][kd_OutputDestination] & "'"
+   end if
+end p_qrtWAX_Write_Bytes
+
+private function p_qrtWAX_Escaped pText
+   local tEscapedText
+   repeat for each char tChar in pText
+      switch tChar
+         case "&"
+            put "&amp;" after tEscapedText
+            break
+         case "<"
+            put "&lt;" after tEscapedText
+            break
+         case ">"
+            put "&gt;" after tEscapedText
+            break
+         case quote
+            put "&quot;" after tEscapedText
+            break
+         default
+            put tChar after tEscapedText
+      end switch
+   end repeat
+   return tEscapedText
+end p_qrtWAX_Escaped
+
+## private > element stack commands and functions
+
+private command p_qrtWAX_PushElem pDocumentId, pElement
+   if sDocumentsA[pDocumentId][kd_ElemNameStack] is empty then
+      put pElement into sDocumentsA[pDocumentId][kd_ElemNameStack]
+   else
+      put pElement & comma before sDocumentsA[pDocumentId][kd_ElemNameStack]
+   end if
+end p_qrtWAX_PushElem
+
+private command p_qrtWAX_PopElem pDocumentId
+   delete item 1 of sDocumentsA[pDocumentId][kd_ElemNameStack]
+end p_qrtWAX_PopElem
+
+private function p_qrtWAX_PeekElem pDocumentId
+   return item 1 of sDocumentsA[pDocumentId][kd_ElemNameStack]
+end p_qrtWAX_PeekElem
